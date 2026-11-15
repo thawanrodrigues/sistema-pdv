@@ -23,7 +23,18 @@
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "bundler": "metro",
+      "name": "PDV Conecta Sistemas",
+      "shortName": "PDV",
+      "description": "Sistema de Ponto de Venda — Conecta Sistemas",
+      "themeColor": "#0f172a",
+      "backgroundColor": "#0f172a",
+      "lang": "pt-BR",
+      "scope": "/",
+      "startUrl": "/",
+      "display": "standalone",
+      "orientation": "landscape"
     },
     "plugins": [
       "expo-router",
@@ -38,11 +49,12 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": false
     }
   }
 }

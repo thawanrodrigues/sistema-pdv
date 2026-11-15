@@ -6,7 +6,9 @@ node_modules/
 # Expo
 .expo/
 dist/
+fiscal-server/dist/
 web-build/
+ControlTec/
 expo-env.d.ts
 
 # Native
