@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,7 @@ import Animated, { FadeIn } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Users, Trash2, X, Pencil, UserPlus } from 'lucide-react-native';
 import { validarCpfCnpj, validarEmail } from '../utils/validators';
+import { requestApi } from '../services/api';
 
 export type ClienteCadastro = {
   id: string;
@@ -51,7 +52,30 @@ export default function ClientesScreen() {
   const [cadastroAberto, setCadastroAberto] = useState(false);
   const [editandoId, setEditandoId] = useState<string | null>(null);
 
+  const carregarClientes = useCallback(async () => {
+    const res = await requestApi<any[]>('/clientes');
+    if (res.ok && Array.isArray(res.data)) {
+      setClientes(
+        res.data.map((c) => ({
+          id: String(c.id),
+          nome: c.nome,
+          documento: c.documento || '',
+          telefone: c.telefone || '',
+          email: c.email || '',
+          cep: c.cep || '',
+          endereco: c.endereco || '',
+          cidade: c.cidade || '',
+          uf: c.uf || '',
+          observacoes: c.observacoes || '',
+          criadoEm: c.criadoEm || '',
+        }))
+      );
+    }
+  }, []);
 
+  useEffect(() => {
+    carregarClientes();
+  }, [carregarClientes]);
 
   const fieldColor = colors.textHeader;
   const inputStyle = {
@@ -77,7 +101,7 @@ export default function ClientesScreen() {
     setForm((f) => ({ ...f, [key]: value }));
   }, []);
 
-  const salvar = useCallback(() => {
+  const salvar = useCallback(async () => {
     const nome = form.nome.trim();
     if (!nome) {
       if (Platform.OS === 'web') window.alert('Validação: Informe o nome ou razão social do cliente.');
@@ -101,24 +125,21 @@ export default function ClientesScreen() {
 
     if (editandoId) {
       // Modo edição: atualiza o cliente existente
-      setClientes((lista) =>
-        lista.map((c) =>
-          c.id === editandoId
-            ? {
-                ...c,
-                nome,
-                documento: form.documento.trim(),
-                telefone: form.telefone.trim(),
-                email: form.email.trim(),
-                cep: form.cep.trim(),
-                endereco: form.endereco.trim(),
-                cidade: form.cidade.trim(),
-                uf: form.uf.trim().toUpperCase().slice(0, 2),
-                observacoes: form.observacoes.trim(),
-              }
-            : c
-        )
-      );
+      await requestApi(`/clientes/${editandoId}`, {
+        method: 'PUT',
+        body: {
+          nome,
+          documento: form.documento.trim(),
+          telefone: form.telefone.trim(),
+          email: form.email.trim(),
+          cep: form.cep.trim(),
+          endereco: form.endereco.trim(),
+          cidade: form.cidade.trim(),
+          uf: form.uf.trim().toUpperCase().slice(0, 2),
+          observacoes: form.observacoes.trim(),
+        },
+      });
+      await carregarClientes();
       setEditandoId(null);
       setForm(emptyForm);
       setCadastroAberto(false);
@@ -126,26 +147,27 @@ export default function ClientesScreen() {
       Alert.alert('Cliente atualizado', `${nome} foi atualizado com sucesso.`);
     } else {
       // Modo criação: adiciona novo cliente
-      const novo: ClienteCadastro = {
-        id: `${Date.now()}`,
-        nome,
-        documento: form.documento.trim(),
-        telefone: form.telefone.trim(),
-        email: form.email.trim(),
-        cep: form.cep.trim(),
-        endereco: form.endereco.trim(),
-        cidade: form.cidade.trim(),
-        uf: form.uf.trim().toUpperCase().slice(0, 2),
-        observacoes: form.observacoes.trim(),
-        criadoEm: new Date().toLocaleString('pt-BR'),
-      };
-      setClientes((lista) => [novo, ...lista]);
+      await requestApi('/clientes', {
+        method: 'POST',
+        body: {
+          nome,
+          documento: form.documento.trim(),
+          telefone: form.telefone.trim(),
+          email: form.email.trim(),
+          cep: form.cep.trim(),
+          endereco: form.endereco.trim(),
+          cidade: form.cidade.trim(),
+          uf: form.uf.trim().toUpperCase().slice(0, 2),
+          observacoes: form.observacoes.trim(),
+        },
+      });
+      await carregarClientes();
       setForm(emptyForm);
       setCadastroAberto(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       Alert.alert('Cliente cadastrado', `${nome} foi adicionado à lista.`);
     }
-  }, [form, editandoId]);
+  }, [form, editandoId, carregarClientes]);
 
   const abrirEdicao = useCallback((c: ClienteCadastro) => {
     setEditandoId(c.id);
@@ -163,7 +185,8 @@ export default function ClientesScreen() {
     setCadastroAberto(true);
   }, []);
 
-  const remover = useCallback((id: string) => {
+  const remover = useCallback(async (id: string) => {
+    await requestApi(`/clientes/${id}`, { method: 'DELETE' });
     setClientes((lista) => lista.filter((c) => c.id !== id));
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);

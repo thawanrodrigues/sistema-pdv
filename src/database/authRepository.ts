@@ -1,8 +1,9 @@
 // ============================================================
-// Repository de Autenticação e Usuários
+// Repository de Autenticação e Usuários - Multi-Tenant PostgreSQL
 // ============================================================
 import { getDB } from './db';
 import { hashSenha, verificarSenha } from '../utils/crypto';
+import { requestApi, setToken, setSavedUser } from '../services/api';
 
 export type Perfil = 'admin' | 'funcionario';
 
@@ -14,6 +15,8 @@ export type Usuario = {
   perfil: Perfil;
   ativo: number;
   criadoEm: string;
+  empresaId?: number;
+  nomeEmpresa?: string;
 };
 
 /** Busca um usuário pelo login e valida a senha */
@@ -21,39 +24,89 @@ export async function autenticar(
   usuario: string,
   senha: string
 ): Promise<Usuario | null> {
-  const db = await getDB();
-  const row = await db.getFirstAsync<{
-    id: number;
-    nome: string;
-    usuario: string;
-    email: string;
-    senha_hash: string;
-    perfil: string;
-    ativo: number;
-    criado_em: string;
-  }>(
-    'SELECT * FROM usuarios WHERE usuario = ? COLLATE NOCASE AND ativo = 1',
-    [usuario.trim()]
-  );
+  const usuarioTrim = usuario.trim();
 
-  if (!row) return null;
+  // 1. Tentar autenticação no Backend PostgreSQL Multi-Tenant
+  const apiRes = await requestApi<{ ok: boolean; token: string; user: any }>('/auth/login', {
+    method: 'POST',
+    body: { usuario: usuarioTrim, senha },
+  });
 
-  const senhaOk = await verificarSenha(senha, row.senha_hash);
-  if (!senhaOk) return null;
+  if (apiRes.ok && apiRes.data?.user) {
+    const u = apiRes.data.user;
+    setToken(apiRes.data.token);
+    setSavedUser(u);
+    return {
+      id: u.id,
+      nome: u.nome,
+      usuario: u.usuario,
+      email: u.email || '',
+      perfil: u.perfil as Perfil,
+      ativo: u.ativo !== undefined ? Number(u.ativo) : 1,
+      criadoEm: u.criadoEm || '',
+      empresaId: u.empresaId,
+      nomeEmpresa: u.nomeEmpresa,
+    };
+  }
 
-  return {
-    id: row.id,
-    nome: row.nome,
-    usuario: row.usuario,
-    email: row.email,
-    perfil: row.perfil as Perfil,
-    ativo: row.ativo,
-    criadoEm: row.criado_em,
-  };
+  // Se o servidor respondeu com erro de validação (ex: senha incorreta ou usuário desativado)
+  if (apiRes.status === 401 || apiRes.status === 403) {
+    throw new Error(apiRes.erro || 'Usuário ou senha incorretos.');
+  }
+
+  // 2. Fallback local (SQLite / localStorage) caso offline
+  try {
+    const db = await getDB();
+    const row = await db.getFirstAsync<{
+      id: number;
+      nome: string;
+      usuario: string;
+      email: string;
+      senha_hash: string;
+      perfil: string;
+      ativo: number;
+      criado_em: string;
+    }>(
+      'SELECT * FROM usuarios WHERE usuario = ? COLLATE NOCASE',
+      [usuarioTrim]
+    );
+
+    if (!row) return null;
+
+    const senhaOk = await verificarSenha(senha, row.senha_hash);
+    if (!senhaOk) return null;
+
+    return {
+      id: row.id,
+      nome: row.nome,
+      usuario: row.usuario,
+      email: row.email,
+      perfil: row.perfil as Perfil,
+      ativo: row.ativo === undefined ? 1 : Number(row.ativo),
+      criadoEm: row.criado_em,
+    };
+  } catch {
+    return null;
+  }
 }
 
-/** Lista todos os funcionários (exceto o admin principal id=1) */
+/** Lista todos os funcionários */
 export async function listarFuncionarios(): Promise<Usuario[]> {
+  // 1. Tentar buscar do Backend PostgreSQL Multi-Tenant
+  const apiRes = await requestApi<any[]>('/usuarios');
+  if (apiRes.ok && Array.isArray(apiRes.data)) {
+    return apiRes.data.map((r) => ({
+      id: r.id,
+      nome: r.nome,
+      usuario: r.usuario,
+      email: r.email || '',
+      perfil: r.perfil as Perfil,
+      ativo: r.ativo ? 1 : 0,
+      criadoEm: r.criadoEm || '',
+    }));
+  }
+
+  // Fallback local
   const db = await getDB();
   const rows = await db.getAllAsync<{
     id: number;
@@ -71,12 +124,12 @@ export async function listarFuncionarios(): Promise<Usuario[]> {
     usuario: r.usuario,
     email: r.email,
     perfil: r.perfil as Perfil,
-    ativo: r.ativo,
+    ativo: r.ativo === undefined ? 1 : Number(r.ativo),
     criadoEm: r.criado_em,
   }));
 }
 
-/** Cria um novo usuário */
+/** Cria um novo usuário colaborador */
 export async function criarUsuario(params: {
   nome: string;
   usuario: string;
@@ -85,53 +138,106 @@ export async function criarUsuario(params: {
   perfil: Perfil;
 }): Promise<{ ok: boolean; msg: string }> {
   try {
+    // 1. Tentar criar no Backend PostgreSQL Multi-Tenant
+    const apiRes = await requestApi('/usuarios', {
+      method: 'POST',
+      body: params,
+    });
+
+    if (apiRes.ok) {
+      return { ok: true, msg: 'Colaborador cadastrado com sucesso!' };
+    } else if (apiRes.status > 0) {
+      return { ok: false, msg: apiRes.erro || 'Erro ao criar colaborador.' };
+    }
+
+    // Fallback local
     const db = await getDB();
-
-    // Verificar se usuário já existe
-    const existe = await db.getFirstAsync<{ id: number }>(
-      'SELECT id FROM usuarios WHERE usuario = ? COLLATE NOCASE',
-      [params.usuario.trim()]
-    );
-    if (existe) return { ok: false, msg: `Usuário "${params.usuario}" já existe.` };
-
     const hash = await hashSenha(params.senha);
     await db.runAsync(
-      `INSERT INTO usuarios (nome, usuario, email, senha_hash, perfil)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO usuarios (nome, usuario, email, senha_hash, perfil, ativo)
+       VALUES (?, ?, ?, ?, ?, 1)`,
       [
         params.nome.trim(),
         params.usuario.trim().toLowerCase(),
-        (params.email || '').trim(),
+        params.email?.trim() || '',
         hash,
         params.perfil,
       ]
     );
-    return { ok: true, msg: 'Usuário criado com sucesso.' };
+
+    return { ok: true, msg: 'Colaborador cadastrado com sucesso!' };
   } catch (e: any) {
-    return { ok: false, msg: e.message || 'Erro ao criar usuário.' };
+    return { ok: false, msg: e.message || 'Erro ao criar colaborador.' };
   }
 }
 
-/** Ativa ou desativa um usuário */
-export async function toggleUsuario(id: number, ativo: boolean): Promise<void> {
-  const db = await getDB();
-  await db.runAsync('UPDATE usuarios SET ativo = ? WHERE id = ?', [ativo ? 1 : 0, id]);
+/** Atualiza um usuário */
+export async function atualizarUsuario(params: {
+  id: number;
+  nome: string;
+  email?: string;
+  perfil: Perfil;
+  ativo?: number;
+  senha?: string;
+}): Promise<{ ok: boolean; msg: string }> {
+  try {
+    const apiRes = await requestApi(`/usuarios/${params.id}`, {
+      method: 'PUT',
+      body: params,
+    });
+    if (apiRes.ok) {
+      return { ok: true, msg: 'Colaborador atualizado com sucesso!' };
+    }
+
+    const db = await getDB();
+    if (params.senha && params.senha.trim()) {
+      const hash = await hashSenha(params.senha);
+      await db.runAsync(
+        'UPDATE usuarios SET nome = ?, email = ?, perfil = ?, senha_hash = ? WHERE id = ?',
+        [params.nome.trim(), params.email?.trim() || '', params.perfil, hash, params.id]
+      );
+    } else {
+      await db.runAsync(
+        'UPDATE usuarios SET nome = ?, email = ?, perfil = ? WHERE id = ?',
+        [params.nome.trim(), params.email?.trim() || '', params.perfil, params.id]
+      );
+    }
+    return { ok: true, msg: 'Colaborador atualizado com sucesso!' };
+  } catch (e: any) {
+    return { ok: false, msg: e.message || 'Erro ao atualizar colaborador.' };
+  }
 }
 
-/** Remove um usuário definitivamente */
+/** Desativa um colaborador */
+export async function desativarUsuario(id: number): Promise<{ ok: boolean; msg: string }> {
+  try {
+    await requestApi(`/usuarios/${id}`, { method: 'DELETE' });
+    const db = await getDB();
+    await db.runAsync('UPDATE usuarios SET ativo = 0 WHERE id = ?', [id]);
+    return { ok: true, msg: 'Colaborador desativado.' };
+  } catch (e: any) {
+    return { ok: false, msg: e.message || 'Erro ao desativar colaborador.' };
+  }
+}
+
+export async function toggleUsuario(id: number, ativoAtual: number): Promise<void> {
+  const novoAtivo = ativoAtual === 1 ? 0 : 1;
+  const db = await getDB();
+  const u = await db.getFirstAsync<any>('SELECT nome, email, perfil FROM usuarios WHERE id = ?', [id]);
+  await atualizarUsuario({
+    id,
+    nome: u?.nome || '',
+    email: u?.email || '',
+    perfil: (u?.perfil || 'funcionario') as Perfil,
+    ativo: novoAtivo,
+  });
+}
+
 export async function removerUsuario(id: number): Promise<void> {
-  const db = await getDB();
-  await db.runAsync('DELETE FROM usuarios WHERE id = ?', [id]);
+  await desativarUsuario(id);
 }
 
-/** Altera a senha de um usuário */
-export async function alterarSenha(id: number, novaSenha: string): Promise<void> {
-  const db = await getDB();
-  const hash = await hashSenha(novaSenha);
-  await db.runAsync('UPDATE usuarios SET senha_hash = ? WHERE id = ?', [hash, id]);
-}
-
-/** Cria usuário admin + empresa no primeiro acesso (registro) */
+/** Cria usuário admin + empresa no primeiro acesso (registro SaaS) */
 export async function primeiroAcesso(params: {
   nomeEmpresa: string;
   cnpj: string;
@@ -143,55 +249,45 @@ export async function primeiroAcesso(params: {
   senha: string;
 }): Promise<{ ok: boolean; msg: string }> {
   try {
-    const db = await getDB();
+    // 1. Chamar o endpoint SaaS PostgreSQL
+    const apiRes = await requestApi<{ ok: boolean; token: string; user: any }>('/auth/register', {
+      method: 'POST',
+      body: params,
+    });
 
-    // Verificar se já existe um admin
-    const admins = await db.getFirstAsync<{ cnt: number }>(
-      'SELECT COUNT(*) as cnt FROM usuarios WHERE perfil = ?',
-      ['admin']
-    );
-
-    // Salvar empresa
-    await db.runAsync(
-      `UPDATE empresa SET
-         razao_social = ?,
-         cnpj = ?,
-         telefone = ?,
-         endereco = ?
-       WHERE id = 1`,
-      [
-        params.nomeEmpresa.trim(),
-        params.cnpj.trim(),
-        (params.telefone || '').trim(),
-        (params.endereco || '').trim(),
-      ]
-    );
-
-    // Criar usuário admin (substituir o padrão se necessário)
-    const hash = await hashSenha(params.senha);
-    const usuarioExiste = await db.getFirstAsync<{ id: number }>(
-      'SELECT id FROM usuarios WHERE usuario = ? COLLATE NOCASE',
-      [params.usuario.trim()]
-    );
-
-    if (usuarioExiste) {
-      await db.runAsync(
-        `UPDATE usuarios SET nome = ?, email = ?, senha_hash = ?, perfil = 'admin'
-         WHERE id = ?`,
-        [params.nome.trim(), params.email.trim(), hash, usuarioExiste.id]
-      );
-    } else {
-      await db.runAsync(
-        `INSERT INTO usuarios (nome, usuario, email, senha_hash, perfil)
-         VALUES (?, ?, ?, ?, 'admin')`,
-        [
-          params.nome.trim(),
-          params.usuario.trim().toLowerCase(),
-          params.email.trim(),
-          hash,
-        ]
-      );
+    if (apiRes.ok && apiRes.data?.user) {
+      setToken(apiRes.data.token);
+      setSavedUser(apiRes.data.user);
+    } else if (apiRes.status > 0) {
+      return { ok: false, msg: apiRes.erro || 'Erro ao cadastrar empresa no servidor.' };
     }
+
+    // 2. Salvar também no banco local (offline support)
+    try {
+      const db = await getDB();
+      await db.runAsync(
+        `UPDATE empresa SET razao_social = ?, cnpj = ?, telefone = ?, endereco = ? WHERE id = 1`,
+        [params.nomeEmpresa.trim(), params.cnpj.trim(), (params.telefone || '').trim(), (params.endereco || '').trim()]
+      );
+
+      const hash = await hashSenha(params.senha);
+      const usuarioExiste = await db.getFirstAsync<{ id: number }>(
+        'SELECT id FROM usuarios WHERE usuario = ? COLLATE NOCASE',
+        [params.usuario.trim()]
+      );
+
+      if (usuarioExiste) {
+        await db.runAsync(
+          `UPDATE usuarios SET nome = ?, email = ?, senha_hash = ?, perfil = 'admin', ativo = 1 WHERE id = ?`,
+          [params.nome.trim(), params.email.trim(), hash, usuarioExiste.id]
+        );
+      } else {
+        await db.runAsync(
+          `INSERT INTO usuarios (nome, usuario, email, senha_hash, perfil, ativo) VALUES (?, ?, ?, ?, 'admin', 1)`,
+          [params.nome.trim(), params.usuario.trim().toLowerCase(), params.email.trim(), hash]
+        );
+      }
+    } catch {}
 
     return { ok: true, msg: 'Empresa cadastrada com sucesso!' };
   } catch (e: any) {
@@ -201,6 +297,22 @@ export async function primeiroAcesso(params: {
 
 /** Busca dados da empresa */
 export async function getEmpresa() {
+  const apiRes = await requestApi('/empresa');
+  if (apiRes.ok && apiRes.data) {
+    return {
+      id: apiRes.data.id,
+      razao_social: apiRes.data.razaoSocial || '',
+      cnpj: apiRes.data.cnpj || '',
+      telefone: apiRes.data.telefone || '',
+      endereco: apiRes.data.endereco || '',
+      pix_chave: apiRes.data.pixChave || '',
+      pix_titular: apiRes.data.pixTitular || '',
+      api_provedor: '',
+      api_token: '',
+      api_secret: '',
+    };
+  }
+
   const db = await getDB();
   return db.getFirstAsync<{
     id: number;
@@ -220,25 +332,33 @@ export async function getEmpresa() {
 export async function salvarEmpresa(params: {
   razaoSocial: string;
   cnpj: string;
-  telefone: string;
-  endereco: string;
-  pixChave: string;
-  pixTitular: string;
-  apiProvedor: string;
-  apiToken: string;
-  apiSecret: string;
+  telefone?: string;
+  endereco?: string;
+  pixChave?: string;
+  pixTitular?: string;
 }): Promise<void> {
+  await requestApi('/empresa', {
+    method: 'PUT',
+    body: params,
+  });
+
   const db = await getDB();
   await db.runAsync(
     `UPDATE empresa SET
-       razao_social = ?, cnpj = ?, telefone = ?, endereco = ?,
-       pix_chave = ?, pix_titular = ?,
-       api_provedor = ?, api_token = ?, api_secret = ?
+       razao_social = ?,
+       cnpj = ?,
+       telefone = ?,
+       endereco = ?,
+       pix_chave = ?,
+       pix_titular = ?
      WHERE id = 1`,
     [
-      params.razaoSocial, params.cnpj, params.telefone, params.endereco,
-      params.pixChave, params.pixTitular,
-      params.apiProvedor, params.apiToken, params.apiSecret,
+      params.razaoSocial.trim(),
+      params.cnpj.trim(),
+      (params.telefone || '').trim(),
+      (params.endereco || '').trim(),
+      (params.pixChave || '').trim(),
+      (params.pixTitular || '').trim(),
     ]
   );
 }

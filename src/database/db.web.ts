@@ -39,6 +39,11 @@ function saveSchema(schema: Schema): void {
 }
 
 let _schema: Schema = loadSchema();
+if (_schema.usuarios?.rows) {
+  _schema.usuarios.rows.forEach((r: Row) => {
+    if (r.ativo === undefined) r.ativo = 1;
+  });
+}
 
 function getTable(name: string): Table {
   if (!_schema[name]) {
@@ -79,6 +84,9 @@ function parseSql(sql: string, params: any[] = []): any {
         row[col] = ph.replace(/^'|'$/g, '');
       }
     });
+    if (tableName === 'usuarios' && row.ativo === undefined) {
+      row.ativo = 1;
+    }
     table.rows.push(row);
     persist();
     return { changes: 1, lastInsertRowId: row.id };
