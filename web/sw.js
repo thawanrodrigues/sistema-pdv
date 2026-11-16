@@ -1,12 +1,12 @@
 // =====================================================
-// Service Worker — Conecta Sistemas PDV
-// Estratégia: Cache First para assets, Network First para navegação
+// Service Worker — Conecta Sistemas PDV v5
+// Estratégia: Network First para garantir atualizações imediatas
 // =====================================================
 
-const CACHE_NAME = 'pdv-cache-v1';
-const STATIC_CACHE = 'pdv-static-v1';
+const CACHE_NAME = 'pdv-cache-v5';
+const STATIC_CACHE = 'pdv-static-v5';
 
-// Assets que serão pré-cacheados no install
+// Assets essenciais
 const PRE_CACHE_URLS = [
   '/',
   '/manifest.json',
@@ -14,18 +14,17 @@ const PRE_CACHE_URLS = [
   '/assets/images/pwa-icon-512.png',
 ];
 
-// ── Install: pré-cacheia os assets essenciais ─────────────────────────────────
+// ── Install: ativa imediatamente sem esperar ───────────────────────────────────
 self.addEventListener('install', (event) => {
+  self.skipWaiting();
   event.waitUntil(
     caches.open(STATIC_CACHE).then((cache) => {
-      return cache.addAll(PRE_CACHE_URLS).catch(() => {
-        // Ignora falhas individuais de pré-cache (offline no primeiro acesso)
-      });
-    }).then(() => self.skipWaiting())
+      return cache.addAll(PRE_CACHE_URLS).catch(() => {});
+    })
   );
 });
 
-// ── Activate: limpa caches antigos ───────────────────────────────────────────
+// ── Activate: limpa TODOS os caches antigos ──────────────────────────────────
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
@@ -38,48 +37,30 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// ── Fetch: estratégia híbrida ─────────────────────────────────────────────────
+// ── Fetch ───────────────────────────────────────────────────────────────────
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Só intercepta requests do mesmo domínio
+  // Ignorar requests de outro domínio
   if (url.origin !== self.location.origin) return;
 
-  // Navegação (HTML) → Network First com fallback para cache
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
+  // NUNCA interceptar chamadas da API
+  if (url.pathname.startsWith('/api')) return;
+
+  // Network First para tudo: busca sempre versão atualizada na rede
+  event.respondWith(
+    fetch(request)
+      .then((response) => {
+        if (response && response.status === 200) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          return response;
-        })
-        .catch(() =>
-          caches.match(request).then((cached) => cached || caches.match('/'))
-        )
-    );
-    return;
-  }
-
-  // Chunks JS/CSS/imagens → Cache First, atualiza em background
-  if (
-    url.pathname.match(/\.(js|css|png|jpg|jpeg|svg|ico|woff2?|ttf)$/)
-  ) {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        const fetchPromise = fetch(request).then((response) => {
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
-          return response;
-        });
-        return cached || fetchPromise;
+        }
+        return response;
       })
-    );
-    return;
-  }
-
-  // Demais requests → Network First
-  event.respondWith(
-    fetch(request).catch(() => caches.match(request))
+      .catch(() => {
+        // Se estiver offline, tenta responder do cache
+        return caches.match(request).then((cached) => cached || caches.match('/'));
+      })
   );
 });

@@ -48,7 +48,10 @@ function patchIndexHtml() {
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
         navigator.serviceWorker.register('/sw.js', { scope: '/' })
-          .then(r => console.log('[PWA] SW registrado:', r.scope))
+          .then(r => {
+            r.update();
+            console.log('[PWA] SW registrado e atualizado:', r.scope);
+          })
           .catch(e => console.warn('[PWA] SW falhou:', e));
       });
     }

@@ -80,7 +80,7 @@ export const authStore = {
         setState({ loading: false });
         return { ok: false, msg: 'Usuário ou senha incorretos.' };
       }
-      if (!user.ativo) {
+      if (user.ativo === 0) {
         setState({ loading: false });
         return { ok: false, msg: 'Usuário desativado. Contate o administrador.' };
       }
